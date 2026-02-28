@@ -27,6 +27,7 @@ LOGIN_ENTRY_URL = "https://console.run.claw.cloud/login"
 SIGNIN_URL = f"{LOGIN_ENTRY_URL}/signin"
 DEVICE_VERIFY_WAIT = 30  # Mobile验证 默认等 30 秒
 TWO_FACTOR_WAIT = int(os.environ.get("TWO_FACTOR_WAIT", "120"))  # 2FA验证 默认等 120 秒
+REDIRECT_WAIT = int(os.environ.get("REDIRECT_WAIT", "120"))
 
 
 class Telegram:
@@ -618,24 +619,62 @@ class AutoLogin:
     def wait_redirect(self, page, wait=60):
         """等待重定向并检测区域"""
         self.log("等待重定向...", "STEP")
+
+        signin_markers = [
+            '/signin',
+            '/login',
+            'auth',
+            'callback',
+        ]
+
+        def is_final_clawcloud_url(url):
+            """判断是否已经离开登录回调页，进入可用控制台页面"""
+            if 'claw.cloud' not in url:
+                return False
+            if 'github.com' in url:
+                return False
+
+            lowered = url.lower()
+            return not any(marker in lowered for marker in signin_markers)
+
         for i in range(wait):
             url = page.url
             
             # 检查是否已跳转到 claw.cloud
-            if 'claw.cloud' in url and 'signin' not in url.lower():
+            if is_final_clawcloud_url(url):
                 self.log("重定向成功！", "SUCCESS")
                 
                 # 检测并记录区域
                 self.detect_region(url)
                 
                 return True
+
+            # 已经回到 ClawCloud，但还停留在登录/回调页：主动触发一次继续登录
+            if 'claw.cloud' in url and 'github.com' not in url:
+                if i % 8 == 0:
+                    self.log("检测到仍在登录页，尝试继续重定向...", "INFO")
+                    self.click(page, [
+                        'button:has-text("GitHub")',
+                        'a:has-text("GitHub")',
+                        '[data-provider="github"]',
+                        'button:has-text("Continue")',
+                        'button:has-text("继续")',
+                    ], "继续登录")
+                    try:
+                        page.wait_for_load_state('domcontentloaded', timeout=15000)
+                    except:
+                        pass
             
             if 'github.com/login/oauth/authorize' in url:
                 self.oauth(page)
+
+            # 部分场景 OAuth 完成后会短暂停留在 sessions/approved，视为重定向链正常
+            if 'github.com/sessions/approved' in url:
+                self.log("GitHub 已批准授权，等待回跳 ClawCloud...", "INFO")
             
             time.sleep(1)
             if i % 10 == 0:
-                self.log(f"  等待... ({i}秒)")
+                self.log(f"  等待... ({i}秒) URL={url}")
         
         self.log("重定向超时", "ERROR")
         return False
@@ -850,7 +889,7 @@ class AutoLogin:
                 
                 # 4. 等待重定向（会自动检测区域）
                 self.log("步骤4: 等待重定向", "STEP")
-                if not self.wait_redirect(page):
+                if not self.wait_redirect(page, wait=REDIRECT_WAIT):
                     self.shot(page, "重定向失败")
                     self.notify(False, "重定向失败")
                     sys.exit(1)
