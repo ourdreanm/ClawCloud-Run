@@ -615,29 +615,51 @@ class AutoLogin:
             time.sleep(3)
             page.wait_for_load_state('networkidle', timeout=30000)
     
-    def wait_redirect(self, page, wait=60):
+    def is_claw_ready_url(self, url):
+        """判断是否已经回到 ClawCloud 的可用页面。"""
+        lower_url = url.lower()
+        if 'claw.cloud' not in lower_url:
+            return False
+
+        # 真正的登录页还未完成
+        if lower_url.rstrip('/') == SIGNIN_URL.lower():
+            return False
+
+        # 某些场景会先落到 signin callback，再由前端继续跳转；这时也视为已回站
+        callback_markers = ['callback', 'code=', 'state=']
+        if 'signin' in lower_url and not any(marker in lower_url for marker in callback_markers):
+            return False
+
+        return True
+
+    def wait_redirect(self, page, wait=90):
         """等待重定向并检测区域"""
         self.log("等待重定向...", "STEP")
         for i in range(wait):
             url = page.url
-            
-            # 检查是否已跳转到 claw.cloud
-            if 'claw.cloud' in url and 'signin' not in url.lower():
+
+            if self.is_claw_ready_url(url):
                 self.log("重定向成功！", "SUCCESS")
-                
-                # 检测并记录区域
                 self.detect_region(url)
-                
                 return True
-            
+
             if 'github.com/login/oauth/authorize' in url:
                 self.oauth(page)
-            
+
+            # 如果已经回到 ClawCloud，但页面停在 signin/callback，一次轻刷新帮助前端完成跳转
+            if 'claw.cloud' in url.lower() and 'github.com' not in url.lower() and i in {15, 30, 45}:
+                try:
+                    page.reload(timeout=15000)
+                    page.wait_for_load_state('domcontentloaded', timeout=15000)
+                    self.log("检测到 ClawCloud 中间页，已尝试刷新继续跳转", "INFO")
+                except Exception as e:
+                    self.log(f"刷新中间页失败: {e}", "WARN")
+
             time.sleep(1)
             if i % 10 == 0:
-                self.log(f"  等待... ({i}秒)")
-        
-        self.log("重定向超时", "ERROR")
+                self.log(f"  等待... ({i}秒) 当前: {url}")
+
+        self.log(f"重定向超时，停留在: {page.url}", "ERROR")
         return False
     
     def keepalive(self, page):
@@ -795,7 +817,7 @@ class AutoLogin:
                 # 1. 访问 ClawCloud 登录入口
                 self.log("步骤1: 打开 ClawCloud 登录页", "STEP")
                 page.goto(SIGNIN_URL, timeout=60000)
-                page.wait_for_load_state('networkidle', timeout=60000)
+                page.wait_for_load_state('domcontentloaded', timeout=60000)
                 time.sleep(2)
                 self.shot(page, "clawcloud")
                 
@@ -816,7 +838,7 @@ class AutoLogin:
                     sys.exit(1)
                 
                 time.sleep(3)
-                page.wait_for_load_state('networkidle', timeout=120000)
+                page.wait_for_load_state('domcontentloaded', timeout=120000)
                 self.shot(page, "点击后")
                 url = page.url
                 self.log(f"当前: {url}")
